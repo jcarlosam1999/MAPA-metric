@@ -187,34 +187,6 @@ results_logs/         per-run logs
 
 Released under the MIT License (see `LICENSE`).
 
-This work is archived as four citable objects, each with its own DOI:
-
-| Object | DOI |
-|---|---|
-| Software (this repository), archived at Zenodo | `10.5281/zenodo.XXXXXXX` |
-| Dataset (results produced by this software), archived at Zenodo | `10.5281/zenodo.YYYYYYY` |
-| Preprint, ChemRxiv | `10.26434/chemrxiv-XXXX-XXXXX` |
-| Article, J. Chem. Theory Comput. | `10.1021/acs.jctc.XXXXXXX` |
-
-All four are placeholders until each record is created. Machine-readable
-metadata for the software, dataset and preprint is in `CITATION.cff`; GitHub
-and Zenodo both read it, and most reference managers import it directly.
-
-If you use the code, cite the software record and the article. If you use the
-numbers without re-running anything, cite the dataset record as well.
-
-```
-Alatorre-Martinez, J. C.; Rafael-Cano, M. G.
-A Real-Space, Regularization-Invariant Metric for Density-Functional Error:
-reference implementation (v1.0.0). Zenodo, 2026.
-DOI: 10.5281/zenodo.XXXXXXX
-
-Alatorre-Martinez, J. C.; Rafael-Cano, M. G.
-A Real-Space, Regularization-Invariant Metric for Density-Functional Error:
-A Proof of Concept on Fundamental Diatomics.
-J. Chem. Theory Comput. 2026. DOI: 10.1021/acs.jctc.XXXXXXX
-```
-
 ### What goes in the dataset record
 
 The software record holds this repository. The dataset record holds what a
