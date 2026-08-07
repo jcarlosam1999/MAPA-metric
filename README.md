@@ -187,6 +187,21 @@ results_logs/         per-run logs
 
 Released under the MIT License (see `LICENSE`).
 
+This work is archived as three citable objects, each with its own DOI:
+
+| Object | DOI |
+|---|---|
+| Software (this repository), archived at Zenodo | [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21813195.svg)](https://doi.org/10.5281/zenodo.21813195) |
+| Dataset (results produced by this software), archived at Zenodo | [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21812943.svg)](https://doi.org/10.5281/zenodo.21812943) |
+| Preprint, ChemRxiv | [![DOI](https://img.shields.io/badge/DOI-10.26434/chemrxiv.15007130/v1-blue.svg)](https://doi.org/10.26434/chemrxiv.15007130/v1) |
+
+All four are placeholders until each record is created. Machine-readable
+metadata for the software, dataset and preprint is in `CITATION.cff`; GitHub
+and Zenodo both read it, and most reference managers import it directly.
+
+If you use the code, cite the software record and the article. If you use the
+numbers without re-running anything, cite the dataset record as well.
+
 ### What goes in the dataset record
 
 The software record holds this repository. The dataset record holds what a

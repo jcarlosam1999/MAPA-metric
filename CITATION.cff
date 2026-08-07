@@ -1,0 +1,50 @@
+cff-version: 1.2.0
+title: >-
+  A Real-Space, Regularization-Invariant Metric for
+  Density-Functional Error: reference implementation
+message: >-
+  If you use this software, please cite both the software
+  (this file) and the accompanying article (preferred-citation).
+type: software
+authors:
+  - given-names: Juan Carlos
+    family-names: Alatorre-Martinez
+    email: jcarlosam1999@gmail.com
+    affiliation: Independent researcher, Guadalajara, Mexico
+  - given-names: Miriam Guadalupe
+    family-names: Rafael-Cano
+    affiliation: Independent researcher, Guadalajara, Mexico
+repository-code: 'https://github.com/jcarlosam1999/MAPA-metric'
+abstract: >-
+  Reference implementation of a real-space, regularization-invariant
+  metric for auditing density-functional error, built on the Wu-Yang
+  inversion of the Kohn-Sham potential applied to multi-reference
+  densities along dissociation coordinates. A single entry point
+  reproduces every result of the accompanying article for ten
+  fundamental diatomic systems: the reference densities, their
+  inversion, the potential and response metrics in exact and
+  self-consistent density modes, the density-reproduction confidence
+  gate, and the validations reported in the Supporting Information.
+keywords:
+  - density functional theory
+  - Kohn-Sham inversion
+  - exchange-correlation potential
+  - static correlation
+  - self-interaction error
+  - regularization
+license: MIT
+version: 1.0.0
+date-released: '2026-08-05'
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21813195
+    description: Archived software (this repository)
+  - type: doi
+    value: 10.5281/zenodo.21812943
+    description: >-
+      Archived dataset: dissociation CSVs, per-geometry grid records,
+      1D potential profiles, fits and run logs produced by this software
+  - type: doi
+    value: 10.26434/chemrxiv.15007130/v1
+    description: Preprint of the accompanying article (ChemRxiv)
+	
