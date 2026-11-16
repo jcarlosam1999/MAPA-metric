@@ -275,7 +275,8 @@ def _load_geometry_context(npz_path):
 
 
 def _sanitize_grid_potential(v_func, v_exact, name, R,
-                             abs_floor=64, frac_cap=1e-2):
+                             abs_floor=64, frac_cap=1e-2,
+                             report_huge=CFG.dv_report_Eh):
     """Replace non-finite points in a functional's grid potential before the
     metric. A GGA potential built from libxc fxc components can produce a
     handful of NaN/inf grid points where the reference density is near-zero or
@@ -289,7 +290,26 @@ def _sanitize_grid_potential(v_func, v_exact, name, R,
     surfaces as missing data rather than a silently patched wrong number.
     Neutralized points are set to v_exact, i.e. Dv=0 there, contributing
     nothing to the |Dv| integral.
+
+    DELIBERATELY NOT A MAGNITUDE THRESHOLD (see D2). The obvious-looking
+    extension — also replace points where |v_func - v_exact| exceeds some cap
+    — was considered and rejected. It would have masked the H2+/PBE artifact
+    instead of explaining it (the real cause was averaging in a spin channel
+    with no electrons; see _spin_average_potential), and it would have put a
+    tunable energy scale inside the metric, which is exactly the "hidden free
+    parameter" the abstract says the metric does not have. A finite but
+    physically impossible potential must surface as a LOUD diagnostic and be
+    diagnosed, not be clipped. Hence `report_huge` below: it warns, it counts,
+    it never edits the data.
     """
+    if report_huge is not None:
+        dv = np.abs(np.asarray(v_func) - np.asarray(v_exact))
+        huge = int(np.sum(np.isfinite(dv) & (dv > report_huge)))
+        if huge:
+            print(f"  [HUGE-DV] {name} R={R:.3f} A: {huge} grid points with "
+                  f"finite |Dv| > {report_huge} Eh (max "
+                  f"{np.nanmax(dv[np.isfinite(dv)]):.3e}). NOT modified — "
+                  f"diagnose before trusting this geometry's DeltaI.")
     bad = ~np.isfinite(v_func)
     nbad = int(bad.sum())
     if nbad == 0:
@@ -306,6 +326,77 @@ def _sanitize_grid_potential(v_func, v_exact, name, R,
     return v
 
 
+def _spin_average_potential(va, vb, rho_a, rho_b, w):
+    """The single spin-averaged potential the total-channel metric compares
+    against the (spin-averaged) exact v_xc. Returns (v_tot, provenance).
+
+    FIX-D2. The rule used to be an unconditional v_tot = (v_a + v_b)/2. That
+    is right when both channels are occupied and WRONG when one of them is
+    empty, because an empty channel has no potential to average in — what
+    libxc returns there is the value of a derivative evaluated at the density
+    FLOOR, not a physical quantity.
+
+    Measured on H2+ (one electron, rho_beta identically zero), PBE, R=0.64 A,
+    aug-cc-pVTZ, grid level 3:
+
+        v_tot = (v_a+v_b)/2      DeltaI_bar = 8.119 Eh   <- Table S10's 8.132
+        alpha channel only       DeltaI_bar = 0.0138 Eh
+
+    and the 8.119 tracks the floor rather than any physics: pushing the
+    beta-density floor from 1e-15 to 1e-10 moves it to 1.786 Eh while the
+    alpha channel does not move in the fourth decimal. The mass of the
+    integral also sits at rho > 1e-2 and 0.5 < r < 1.0 bohr, i.e. in the DENSE
+    part of Omega, which rules out the low-density-corona reading as well.
+    The beta term is an artifact of evaluating a spin derivative on a channel
+    with no electrons; it is not a large-but-finite GGA value that a magnitude
+    threshold should be invented to catch.
+
+    So: a channel that holds no electrons does not vote. Every genuinely
+    open-shell system (He2+, B2, CH) has both channels occupied and is
+    numerically unchanged by this; H2+ is the only member of the benchmark
+    with an empty channel, and it is the only row that moves. NO free
+    parameter enters the metric — `occ_tol` is an integer-electron-count test
+    (channels hold 0 or >= 1 electrons; nothing sits near 1e-8), not a
+    tunable knob.
+    """
+    occ_tol = 1e-8
+    na = float(np.sum(np.asarray(rho_a) * w)) if rho_a is not None else 0.0
+    nb = float(np.sum(np.asarray(rho_b) * w)) if rho_b is not None else 0.0
+    occ_a, occ_b = na > occ_tol, nb > occ_tol
+    if occ_a and occ_b:
+        return 0.5 * (va + vb), {'spin_average': 'both',
+                                 'n_alpha': na, 'n_beta': nb}
+    if occ_a:
+        return va, {'spin_average': 'alpha_only', 'n_alpha': na,
+                    'n_beta': nb}
+    if occ_b:
+        return vb, {'spin_average': 'beta_only', 'n_alpha': na,
+                    'n_beta': nb}
+    raise RuntimeError(
+        "both spin channels are empty on the grid — the density fed to the "
+        "metric integrates to zero; this is a broken geometry, not a result.")
+
+
+def _density_for_mode(ctx, finfo, density_mode):
+    """THE single place that answers 'which density does this (functional,
+    mode) pair use?'. Returns a dict with the total density matrix and grid
+    density, plus the spin-resolved pieces when they exist.
+
+    FIX-D1. This used to be inlined in deltaI_for_geometry only, so the 1D
+    profile writer had no way to ask the question and silently used the exact
+    density for BOTH modes — the labels branched, the physics did not. One
+    function, two callers, no way for them to disagree.
+    """
+    if density_mode == 'exact':
+        return dict(dm_tot=ctx['exact_dm'], rho_tot=ctx['rho_exact'],
+                    dma=ctx['dma'], dmb=ctx['dmb'],
+                    rho_a=ctx['rho_a'], rho_b=ctx['rho_b'])
+    if density_mode == 'scf':
+        return _scf_density(ctx, finfo)
+    raise ValueError(f"density_mode must be 'exact' or 'scf', "
+                     f"got {density_mode!r}")
+
+
 def deltaI_for_geometry(finfo, ctx, density_mode):
     """DeltaI_bond for one functional at one geometry, from a preloaded
     context. Closed shell: total-density comparison (as before). Open shell:
@@ -316,14 +407,8 @@ def deltaI_for_geometry(finfo, ctx, density_mode):
     mol, coords, w, R = ctx['mol'], ctx['coords'], ctx['w'], ctx['R']
 
     if not ctx['open_shell']:
-        if density_mode == 'exact':
-            dm, rho_metric = ctx['exact_dm'], ctx['rho_exact']
-        elif density_mode == 'scf':
-            s = _scf_density(ctx, finfo)
-            dm, rho_metric = s['dm_tot'], s['rho_tot']
-        else:
-            raise ValueError(f"density_mode must be 'exact' or 'scf', "
-                             f"got {density_mode!r}")
+        s = _density_for_mode(ctx, finfo, density_mode)
+        dm, rho_metric = s['dm_tot'], s['rho_tot']
         vxc_func, prov = functional_vxc_on_grid(finfo, mol, dm, coords)
         vxc_func = _sanitize_grid_potential(vxc_func, ctx['vxc_exact'],
                                             finfo.name, R)
@@ -344,22 +429,15 @@ def deltaI_for_geometry(finfo, ctx, density_mode):
         return out
 
     # ---- open shell: spin-resolved Tier-1 path -------------------------
-    if density_mode == 'exact':
-        ra, rb = ctx['rho_a'], ctx['rho_b']
-        dma, dmb = ctx['dma'], ctx['dmb']
-        rho_metric_tot = ctx['rho_exact']
-    elif density_mode == 'scf':
-        s = _scf_density(ctx, finfo)
-        ra, rb = s['rho_a'], s['rho_b']
-        dma, dmb = s['dma'], s['dmb']
-        rho_metric_tot = s['rho_tot']
-    else:
-        raise ValueError(f"density_mode must be 'exact' or 'scf', "
-                         f"got {density_mode!r}")
+    s = _density_for_mode(ctx, finfo, density_mode)
+    ra, rb = s['rho_a'], s['rho_b']
+    dma, dmb = s['dma'], s['dmb']
+    rho_metric_tot = s['rho_tot']
 
     (va, vb), prov = functional_vxc_spin_on_grid(finfo, mol, dma, dmb,
                                                  ra, rb, coords)
-    v_tot = 0.5 * (va + vb)
+    v_tot, spin_prov = _spin_average_potential(va, vb, ra, rb, ctx['w'])
+    prov = {**prov, **spin_prov}
     _, dI_bar, _ = mt.delta_metrics(ctx['vxc_exact'], v_tot,
                                     rho_metric_tot, coords, w, R)
     out = {'R': R, 'dI_bar': float(dI_bar),
@@ -373,12 +451,17 @@ def deltaI_for_geometry(finfo, ctx, density_mode):
         out.update({'dI_resp': np.nan, 'dI_resp_degtol_span': np.nan,
                     'resp_n_skipped': -1,
                     'resp_note': f"{type(e).__name__}: {e}"[:120]})
-    # per-channel DeltaI when the exact spin potentials were saved
+    # per-channel DeltaI when the exact spin potentials were saved. FIX-D2:
+    # an EMPTY channel gets no number. With volume weighting the integral of
+    # an empty channel is perfectly well defined arithmetically and perfectly
+    # meaningless physically — which is how the 8.132 got published.
     if ctx['vxc_a'] is not None and ctx['vxc_b'] is not None:
-        _, dIa, _ = mt.delta_metrics(ctx['vxc_a'], va, ra, coords, w, R)
-        _, dIb, _ = mt.delta_metrics(ctx['vxc_b'], vb, rb, coords, w, R)
-        out['dI_bar_alpha'] = float(dIa)
-        out['dI_bar_beta'] = float(dIb)
+        if prov.get('spin_average') in (None, 'both', 'alpha_only'):
+            _, dIa, _ = mt.delta_metrics(ctx['vxc_a'], va, ra, coords, w, R)
+            out['dI_bar_alpha'] = float(dIa)
+        if prov.get('spin_average') in (None, 'both', 'beta_only'):
+            _, dIb, _ = mt.delta_metrics(ctx['vxc_b'], vb, rb, coords, w, R)
+            out['dI_bar_beta'] = float(dIb)
     return out
 
 
@@ -502,7 +585,8 @@ def evaluate_system(name, spec, density_modes=('exact', 'scf'),
     wrapper over the shared single-load engine; run_functional_evaluation
     uses the same engine for all functionals at once)."""
     finfo = resolve_functional(spec)
-    curves, dead = _evaluate_system_all(name, [finfo], density_modes, npz_dir)
+    curves, dead, _ = _evaluate_system_all(name, [finfo], density_modes,
+                                           npz_dir)
     result = {'system': name, 'functional': finfo.name, 'rung': finfo.rung,
               'is_multiplicative': finfo.is_multiplicative, 'modes': {}}
     for mode in density_modes:
@@ -525,11 +609,20 @@ def _evaluate_system_all(name, finfos, density_modes, npz_dir):
               'alpha', 'beta'),
       dead:   {(func_name, mode): tier-gate error}   (NotImplementedError
               applies to the whole functional, so it is raised once and the
-              pair is skipped from then on)."""
+              pair is skipped from then on),
+      dm_bank: {(func_name, mode, rkey): density matrix used for the metric}
+              — see FIX-D1. The 1D profile writer (make_comparative_figure)
+              MUST evaluate each labelled column on the SAME density the
+              metric used, and the only place that density exists is the
+              per-geometry context created here. Handing back the (small,
+              nao x nao) matrices is what lets the deposit and the tables be
+              the same numbers; recomputing the SCF downstream would let the
+              two converge to different solutions, which is the very failure
+              being fixed."""
     paths = sorted(glob.glob(os.path.join(npz_dir, f"{name}_R*.npz")))
     if not paths:
         raise FileNotFoundError(f"no npz for system {name!r} in {npz_dir}")
-    curves, dead = {}, {}
+    curves, dead, dm_bank = {}, {}, {}
     for p in paths:
         try:
             ctx = _load_geometry_context(p)
@@ -537,6 +630,16 @@ def _evaluate_system_all(name, finfos, density_modes, npz_dir):
             print(f"  [npz skip] {os.path.basename(p)}: "
                   f"{type(e).__name__}: {e}")
             continue
+        for finfo in finfos:
+            for mode in density_modes:
+                if (finfo.name, mode) in dead:
+                    continue
+                try:
+                    dm_bank[(finfo.name, mode, _rkey(ctx['R']))] = \
+                        _density_for_mode(ctx, finfo, mode)
+                except Exception:                        # noqa: BLE001
+                    pass    # absent key => the writer refuses to write, and
+                            # says so; it never falls back to another density
         for finfo in finfos:
             for mode in density_modes:
                 if (finfo.name, mode) in dead:
@@ -564,19 +667,38 @@ def _evaluate_system_all(name, finfos, density_modes, npz_dir):
                         # 0.444) would silently never match the lookup
                         curves.setdefault((finfo.name, mode, ch),
                                           {})[_rkey(res['R'])] = res[key]
-    return curves, dead
+    return curves, dead, dm_bank
 
 
 def make_comparative_figure(name, finfo, density_mode='exact',
                             draw_figure=True,
                             vxc_dir='results_vxc_1D',
                             npz_dir='results_grid_data',
-                            energies_dir='results_energies'):
+                            energies_dir='results_energies',
+                            dm_bank=None):
     """Regenerate the exact-vs-functional comparative v_xc figure from SAVED
     artifacts, with NO expensive rerun: the exact 1-RDM and identity come from
     the npz (geometry-level, grid-independent), the exact profile + line
     coordinates from the 1D CSV. The functional's v_xc is evaluated on that
-    line using the saved DM. The heavy pipeline no longer makes figures."""
+    line using the density THAT MODE actually uses. The heavy pipeline no
+    longer makes figures.
+
+    `dm_bank`: {(func_name, mode, rkey): density dict} handed down by
+    _evaluate_system_all, which already ran (and cached) the KS-SCF for the
+    metric. Passing it costs nothing and guarantees the deposit column and the
+    table value come from the SAME density.
+
+    FIX-D1. The previous version evaluated the functional on `exact_dm` for
+    every mode while naming the column after the mode, so
+    Vxc_<f>_exact and Vxc_<f>_scf were the same array in all 203 published
+    profiles. Two rules now hold, and both matter:
+      1. the density comes from _density_for_mode, the same function the
+         metric uses;
+      2. if that density cannot be obtained (no dm_bank entry and no npz to
+         rebuild one, or a non-converged SCF), the column is NOT WRITTEN and
+         the reason is printed. A missing column is data; a column labelled
+         'scf' holding the exact density is not.
+    """
     import pandas as pd
     import matplotlib
     matplotlib.use('Agg')
@@ -598,6 +720,24 @@ def make_comparative_figure(name, finfo, density_mode='exact',
         d = np.load(npz_path, allow_pickle=True)
         meta = json.loads(str(d['meta']))
         exact_dm = d['exact_dm']
+        # ---- FIX-D1: the density this labelled column is entitled to -------
+        key = (finfo.name, density_mode, _rkey(R))
+        dens = (dm_bank or {}).get(key)
+        if dens is None:
+            if density_mode == 'exact':
+                dens = {'dm_tot': exact_dm}
+            else:
+                # standalone call (no bank): rebuild the context and run the
+                # SCF here. Costs one KS-SCF; refuses rather than substitutes.
+                try:
+                    ctx = _load_geometry_context(npz_path)
+                    dens = _density_for_mode(ctx, finfo, density_mode)
+                except Exception as e:                       # noqa: BLE001
+                    print(f"  [1D column skipped] {name} R={R:.2f} "
+                          f"{finfo.name}/{density_mode}: "
+                          f"{type(e).__name__}: {e}")
+                    continue
+        dm_line = dens['dm_tot']
         from benchmark import Z
         member = dict(name=name, a1=meta['a1'], a2=meta['a2'],
                       charge=int(meta['charge']), spin=int(meta['spin']),
@@ -610,7 +750,7 @@ def make_comparative_figure(name, finfo, density_mode='exact',
         line_pts = np.column_stack([np.zeros(len(prof)), np.zeros(len(prof)),
                                     prof['Z_Bohr'].values])
         try:
-            vxc_func_line, _ = functional_vxc_on_grid(finfo, mol, exact_dm,
+            vxc_func_line, _ = functional_vxc_on_grid(finfo, mol, dm_line,
                                                       line_pts)
         except NotImplementedError:
             return   # Tier 2/3 without convention: no figure, already flagged
@@ -722,7 +862,8 @@ def run_functional_evaluation(functionals, density_modes=('exact', 'scf'),
                               npz_dir='results_grid_data',
                               energies_dir='results_energies',
                               out_summary='results_energies/'
-                                          'Functional_Comparison.csv'):
+                                          'Functional_Comparison.csv',
+                              force=False):
     """Post-pass over the saved exact side, restructured so each geometry's
     npz is loaded ONCE and every functional x density-mode (and, for open
     shell, every spin channel) is evaluated inside. Merges explicit
@@ -739,13 +880,59 @@ def run_functional_evaluation(functionals, density_modes=('exact', 'scf'),
     finfos = [resolve_functional(s) for s in functionals]
     summary_rows = []
 
+    # Rows of a system that is skipped below still belong in the benchmark
+    # summary: rebuilding it from only the systems recomputed this time would
+    # silently shrink it.
+    previous = (pd.read_csv(out_summary) if os.path.exists(out_summary)
+                else pd.DataFrame())
+
+    def _already_scored(df_):
+        """Has this system got every column the requested (functional, mode)
+        pairs would write?
+
+        The skip used to live one level up, in `pending_functionals`, which
+        asks whether a functional is scored in EVERY system at once. That is
+        the right question for deciding which functionals to pass in, and the
+        wrong one for deciding what to recompute: one system missing its
+        columns made the post-pass re-score all ten, and a user who had set
+        `functional_postpass_force = False` watched it do exactly what that
+        flag is supposed to prevent. Reported 2026-08-09. The decision is now
+        taken per system, where the cost is."""
+        if df_ is None or force:
+            return False
+        cols = set(df_.columns)
+        for fi_ in finfos:
+            for m_ in density_modes:
+                need = {column_name(fi_.name, m_),
+                        column_name(fi_.name, m_, kind='dIresp')}
+                if not need <= cols:
+                    return False
+                if df_[list(need)].isna().all().any():
+                    return False          # column present but never filled
+        # A geometry recomputed by the scan has had its metric cells blanked
+        # by `pipeline._write_curve`, which is invisible above: one NaN in a
+        # full column is not an empty column. Without this the system would be
+        # reported as already scored and that geometry would keep its hole.
+        if 'postpass_cleared' in df_.columns and df_['postpass_cleared'].any():
+            return False
+        return True
+
     for name in systems:
         csv_path = os.path.join(energies_dir, f"{name}_Dissociation_Curve.csv")
         df = (pd.read_csv(csv_path) if os.path.exists(csv_path) else None)
         r_eq = _R_EQ_MAP.get(name)
 
-        curves, dead = _evaluate_system_all(name, finfos, density_modes,
-                                            npz_dir)
+        if _already_scored(df):
+            keep = (previous[previous['system'] == name]
+                    if 'system' in previous.columns else pd.DataFrame())
+            summary_rows.extend(keep.to_dict('records'))
+            print(f"  {name}: already scored for "
+                  f"{', '.join(f.name for f in finfos)}; skipping "
+                  f"({len(keep)} summary rows carried over)")
+            continue
+
+        curves, dead, dm_bank = _evaluate_system_all(name, finfos,
+                                                     density_modes, npz_dir)
 
         for finfo in finfos:
             for mode in density_modes:
@@ -797,6 +984,8 @@ def run_functional_evaluation(functionals, density_modes=('exact', 'scf'),
                     is_multiplicative=finfo.is_multiplicative, note=''))
 
         if df is not None:
+            if 'postpass_cleared' in df.columns:
+                df = df.drop(columns=['postpass_cleared'])
             df.to_csv(csv_path, index=False)
 
         # comparative figures (exact vs functional), one per functional
@@ -807,7 +996,8 @@ def run_functional_evaluation(functionals, density_modes=('exact', 'scf'),
                 # first mode, so the modes do not overwrite each other's plot.
                 for _i, _dm in enumerate(density_modes):
                     make_comparative_figure(name, finfo, density_mode=_dm,
-                                            draw_figure=(_i == 0))
+                                            draw_figure=(_i == 0),
+                                            dm_bank=dm_bank)
             except Exception:                            # noqa: BLE001
                 pass   # figures are illustrative; never block the data pass
 

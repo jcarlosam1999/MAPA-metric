@@ -124,7 +124,11 @@ CFG.resume = True                 # reload finished rows + warm-start chain
 # no inversion rerun. Add any libxc functional here; Tier-1 (LDA/GGA) are
 # validated, meta-GGA/hybrids need their convention validated first.
 CFG.run_functional_postpass = True
-CFG.functional_postpass_force = True   # True: re-score even if the
+# False, deliberately. A stage that redoes finished work on every launch makes
+# the run un-relaunchable: the whole point of the artifact registry is that a
+# second `python main.py` costs minutes, not days. Set it to True only after
+# changing what the post-pass produces.
+CFG.functional_postpass_force = False  # True: re-score even if the
                                        # columns are already on disk
 
 # ---- validations (Supporting Information) ------------------------------------
@@ -138,10 +142,40 @@ CFG.validate_kappa_invariance = True          # ~30 min  (H2, 3R x 3 kappa)
 CFG.validate_kappa_wide_range = True         # ~15 min  (H2, 1e-9..1e-5)
 CFG.validate_ensemble_seam = True            # ~20 min  (H2, seam exposed)
 CFG.validate_kappa_invariance_heavy = True   # ~4 h     (N2, 3R x 3 kappa)
+CFG.validate_kappa_invariance_extra = True  # ~1 h     (LiH and HF rows of Table 1)
 CFG.validate_fine_grid_scan = True          # ~2-3 h   (fine H2 scan)
 CFG.functionals_to_eval = ['LDA,VWN', 'PBE,PBE']   # e.g. add 'SCAN,SCAN' once
                                                    # its tau convention is set
 CFG.functional_density_modes = ('exact', 'scf')    # both = error cancellation
+
+# ---- controls added after the first submission (SI S11.4, S11.5, S13) --------
+# Same benchmark, same ten systems, same scan: these post-process what the run
+# already computed. `basis_convergence` is the exception -- it must re-invert,
+# because what it measures is what the inversion does when the orbital basis
+# changes -- and it does so in its own subdirectory, never touching the
+# deposit.
+CFG.run_validation_extra = True
+CFG.validate_tier1_five = True             # ~minutes: BLYP/PBEsol/revPBE
+CFG.validate_fixed_volume = True           # ~minutes: fixed-volume control
+CFG.validate_basis_convergence = True      # ~hours:  one system in aug-cc-pVQZ
+CFG.validate_n2v_cross_check = True        # skipped if n2v is not installed
+CFG.validate_reduced_coordinate = True     # ~seconds: reads the curves only
+CFG.validate_density_comparison = True     # ~1 hour: SI S16, MAPA vs SCF density
+CFG.fixed_volume_systems = ('HH_q+1_s1', 'HH_q+0_s0')   # both rows of S11.4
+CFG.basis_convergence_system = 'HH_q+0_s0'
+CFG.basis_convergence_basis = 'aug-cc-pVQZ'
+CFG.n2v_system = 'HH_q+0_s0'
+CFG.validation_force = False               # True: redo validations already on disk
+
+# ---- self-tests and verification --------------------------------------------
+# The regression tests are part of the run, not a separate ritual: each one
+# pins a bug that silently changed published numbers once (D1 density modes,
+# D2 empty spin channel, D6 deposit audit). The verification layer then checks
+# every figure the manuscript prints against what this run produced, and its
+# failure count becomes the process exit code -- so a run that does not
+# reproduce the paper cannot end in success.
+CFG.run_self_tests = True
+CFG.run_verification = True
  
 # ---- run scope ----------------------------------------------------------------
 ONLY_MEMBERS = [
@@ -317,6 +351,7 @@ def main():
     # present in every dissociation CSV are skipped, so re-running main.py after
     # adding one functional scores only that one.
     if CFG.run_functional_postpass:
+        import artifacts as art
         from functional_eval import (run_functional_evaluation,
                                      pending_functionals)
         if CFG.functional_postpass_force:
@@ -329,14 +364,22 @@ def main():
         if CFG.functional_postpass_force:
             print("  forced re-score (functional_postpass_force = True)")
         if done:
-            print(f"  already scored, skipping: {', '.join(map(str, done))}")
+            print(f"  already scored, not rescored: "
+                  f"{', '.join(map(str, done))}")
         if pending:
             print(f"  scoring: {', '.join(map(str, pending))}")
             run_functional_evaluation(
-                pending, density_modes=CFG.functional_density_modes)
-            print("  see results_energies/Functional_Comparison.csv")
+                pending, density_modes=CFG.functional_density_modes,
+                force=CFG.functional_postpass_force)
         else:
-            print("  nothing to do: every requested functional is on disk.")
+            print("  nothing to rescore: every requested functional is on "
+                  "disk.")
+        # Either way, print what the post-pass produced. Skipping the work is
+        # not a reason to skip the result: a run that scored nothing new still
+        # has to say what the scoring came to, or the reader cannot tell a
+        # skipped stage from a stage that produced nothing.
+        art.report('functional_postpass',
+                   read=not bool(pending), log=print)
 
     # Validations behind the Supporting Information. They read what this run
     # just produced, so every number in the paper comes out of `python main.py`.
@@ -346,7 +389,101 @@ def main():
         # stdout is teed into the run log, so plain print is enough here.
         validation.run_all(log=print,
                            deriv_member=CFG.validation_openshell_member)
- 
- 
+
+    if CFG.run_validation_extra:
+        _run_extra_validations()
+
+    if CFG.run_self_tests:
+        _run_self_tests()
+
+    _print_artifact_status()
+
+    if CFG.run_verification:
+        from verification import runner
+        print("\n=== Verification: does this run reproduce the paper? ===")
+        failures = runner.run_all()
+        if failures:
+            print(f"\n{failures} checks failed. Exit code {min(failures, 125)}.")
+            sys.exit(min(failures, 125))
+        print("\nEvery figure the manuscript prints comes out of this run.")
+
+
+def _run_extra_validations():
+    """The six post-submission controls, each skipped if already on disk."""
+    import artifacts as art
+    import validation_extra as vx
+    import density_comparison as dc
+
+    plan = [('tier1_five', 'validate_tier1_five', vx.run_tier1_five),
+            ('fixed_volume_response', 'validate_fixed_volume',
+             vx.run_fixed_volume_response),
+            ('basis_convergence', 'validate_basis_convergence',
+             vx.run_basis_convergence),
+            ('n2v_cross_check', 'validate_n2v_cross_check',
+             vx.run_n2v_cross_check),
+            ('reduced_coordinate', 'validate_reduced_coordinate',
+             vx.run_reduced_coordinate),
+            ('density_comparison', 'validate_density_comparison',
+             dc.run_density_comparison)]
+    print("\n=== Additional controls (SI S11.4, S11.5, S11.6, S13, S16) ===")
+    for tag, flag, fn in plan:
+        if not getattr(CFG, flag, False):
+            print(f"  {tag}: disabled in the control room")
+            continue
+        if art.have(tag) and not CFG.validation_force:
+            art.report(tag, read=True)
+            continue
+        try:
+            fn(log=print)
+            if art.have(tag):
+                art.report(tag, read=False)
+        except SystemExit as e:
+            print(f"  {tag}: cannot run yet -- {e}")
+        except Exception as e:                                # noqa: BLE001
+            # One control failing must not discard the rest of the run: the
+            # benchmark that took days is already on disk.
+            print(f"  {tag}: FAILED ({type(e).__name__}: {e})")
+
+
+def _run_self_tests():
+    """The regression tests, as a stage rather than as a separate ritual.
+
+    Each one pins a defect that once changed published numbers without any
+    error being raised, which is precisely the kind that a run has to be able
+    to catch by itself.
+    """
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    tests = sorted(f for f in os.listdir(os.path.join(here, 'tests'))
+                   if f.startswith('test_') and f.endswith('.py'))
+    print("\n=== Self-tests ===")
+    bad = []
+    for t in tests:
+        # The tests live in tests/ and import the package they test, so the
+        # package root goes on PYTHONPATH; running them from tests/ would put
+        # the wrong directory first and they would not find it.
+        env = dict(os.environ)
+        env['PYTHONPATH'] = here + os.pathsep + env.get('PYTHONPATH', '')
+        r = subprocess.run([sys.executable, os.path.join(here, 'tests', t)],
+                           cwd=here, env=env, capture_output=True, text=True)
+        ok = r.returncode == 0
+        print(f"  {'ok  ' if ok else 'FAIL'}  {t}")
+        if not ok:
+            bad.append(t)
+            for line in (r.stdout + r.stderr).strip().split('\n')[-8:]:
+                print(f"        {line}")
+    if bad:
+        print(f"  {len(bad)} self-test(s) failed: {', '.join(bad)}")
+
+
+def _print_artifact_status():
+    """What this run has on disk, stage by stage. Printed before the checks so
+    a failure can be read as 'not produced yet' rather than 'wrong'."""
+    import artifacts as art
+    print("\n=== Stage artifacts ===")
+    for tag, done, what in art.status():
+        print(f"  {'present' if done else 'MISSING'}  {tag:<24} {what}")
+
+
 if __name__ == "__main__":
     main()

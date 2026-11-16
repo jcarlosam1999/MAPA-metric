@@ -192,7 +192,15 @@ class Config:
     # irrelevance must be shown, not asserted. Run the sweep at 2 and 8 and
     # report that DeltaI_bar does not move (it cannot: the fit, not the guide,
     # determines v_xc wherever the density has support).
-    guide_lda_core: bool = True      # False = legacy pure Fermi-Amaldi
+    # PRODUCTION VALUE: False = pure Fermi-Amaldi. Set to False on 2026-08-07
+    # (finding D4). It had been True while pipeline.py never called
+    # xc_guide_on_points, so 197 of the 203 published geometries were run with
+    # pure Fermi-Amaldi and 6 (N2, R >= 2.585 A) with the interpolated guide.
+    # The flag now means what it says: whatever it is set to is what the whole
+    # scan uses. Turning it back on re-inverts every system with N > 2 — 8 of
+    # the 10 members, 161 of the 203 geometries — so it is a decision for a
+    # fresh benchmark, not a switch to flip mid-project.
+    guide_lda_core: bool = False     # True = interpolated LDA-core guide
     guide_rho_switch: float = 4.0    # e/bohr^3, FA <-> LDA crossover density
     # closed-shell representability breakdown -> broken-symmetry fallback.
     # When the restricted KS gap collapses below rks_breakdown_gap while the
@@ -211,10 +219,26 @@ class Config:
     # DeltaI_bar weighting: 'volume' (corrected) or 'density' (legacy).
     # The exact vxc's mid-bond correlation barrier lives where the density is
     # LOWEST, so rho-weighting suppresses the signal the metric exists to
-    # detect and lets the nuclear region dominate — it made DeltaI_bar peak at
-    # EQUILIBRIUM (R=0.740) instead of at Coulson-Fischer (R=1.258 measured,
-    # D_CF=1.305). 'density' is kept only to reproduce legacy numbers.
+    # detect and lets the nuclear region dominate — it moved the DeltaI_bar
+    # maximum out of the bond-breaking region and up against equilibrium.
+    # 'density' is kept only to reproduce legacy numbers.
+    # NO PEAK POSITION IS QUOTED HERE, ON PURPOSE (see D3). This comment used
+    # to carry R=0.740 / R=1.258 while the paper carried 0.814 / 1.146: four
+    # numbers, two sources, no pair agreeing — and the peak POSITION is the
+    # one thing the paper claims about this metric. The peak now has exactly
+    # one generator (validation.run_grid_resolution, over the production
+    # *_Dissociation_Curve.csv) and exactly one written home
+    # (HECHOS_Y_CIFRAS.md). Do not re-inline it anywhere.
     dIbar_weighting: str = 'volume'
+    # D2 diagnostic: report — never modify — finite grid points whose
+    # deviation from the exact potential exceeds this, in Eh. A PRINTED
+    # WARNING THRESHOLD, not a metric parameter: no value of it changes any
+    # number the paper reports. None silences it.
+    dv_report_Eh: float = 10.0
+    # Task 5.3: exporters.save_line_csv audits every 1D profile before writing
+    # it. True = a failing profile aborts the run. Set False only to
+    # re-analyse an existing tree that is already known to be broken.
+    deposit_audit_strict: bool = True
     # Run log: every per-geometry status line and every end-of-system fit
     # report is appended here as well as printed, so a closed terminal or a
     # crash never loses the record of what was done. main.py gives each shard
@@ -308,6 +332,7 @@ class Config:
     validate_kappa_wide_range: bool = False
     validate_ensemble_seam: bool = False
     validate_kappa_invariance_heavy: bool = False
+    validate_kappa_invariance_extra: bool = False
     validate_fine_grid_scan: bool = False
     # parameters of the individual validations
     # The R values below must be POINTS OF THE PRODUCTION GRID, otherwise the
@@ -319,6 +344,14 @@ class Config:
                                      (1e-7, 1e-6, 1e-5))
     validation_kappa_wide: tuple = ('HH_q+0_s0', (1.073,),
                                     (1e-9, 1e-8, 1e-7, 1e-6, 1e-5))
+    # Table 1 has LiH and HF rows too: a polar closed shell and the most
+    # restrictive member of the set. They were produced by hand once, which
+    # meant three of the twelve rows of the central table were not reachable
+    # from `python main.py`. They are now a probe like the others.
+    validation_kappa_extra: tuple = (
+        ('HLi_q+0_s0', (1.600, 2.000, 2.400), (1e-7, 1e-6, 1e-5)),
+        ('HF_q+0_s0', (0.552, 0.626, 0.699), (1e-7, 1e-6, 1e-5)),
+    )
     validation_seam_system: str = 'HH_q+0_s0'
     validation_fine_scan_system: str = 'HH_q+0_s0'
     validation_fine_scan_points: int = 27

@@ -10,10 +10,10 @@ authors:
   - given-names: Juan Carlos
     family-names: Alatorre-Martinez
     email: jcarlosam1999@gmail.com
-    affiliation: Independent researcher, Guadalajara, Mexico
+    affiliation: "Independent researcher, Tonalá, Jalisco, Mexico"
   - given-names: Miriam Guadalupe
     family-names: Rafael-Cano
-    affiliation: Independent researcher, Guadalajara, Mexico
+    affiliation: "Independent researcher, Tonalá, Jalisco, Mexico"
 repository-code: 'https://github.com/jcarlosam1999/MAPA-metric'
 abstract: >-
   Reference implementation of a real-space, regularization-invariant
@@ -33,8 +33,8 @@ keywords:
   - self-interaction error
   - regularization
 license: MIT
-version: 1.0.0
-date-released: '2026-08-05'
+version: 1.1.0
+date-released: '2026-11-08'
 identifiers:
   - type: doi
     value: 10.5281/zenodo.21813195
@@ -47,4 +47,3 @@ identifiers:
   - type: doi
     value: 10.26434/chemrxiv.15007130/v1
     description: Preprint of the accompanying article (ChemRxiv)
-	

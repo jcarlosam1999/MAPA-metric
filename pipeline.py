@@ -58,11 +58,36 @@ def process_geometry(member, r):
         rho_spin = (rga[0], rgb[0])
 
     # ---- 3) Fermi-Amaldi guide + inversion (inversion.py) -----------------
+    # FIX-D4, settled 2026-08-07 in favour of PURE FERMI-AMALDI.
+    #
+    # The problem was never which of the two priors is better. It was that the
+    # scan used BOTH. The published deposit carried `guide_core_shift_Eh` in 6
+    # of the 203 geometries -- all N2 with R >= 2.585 A -- and in none of the
+    # others: the earlier rows were reloaded from the .row.json cache and the
+    # last ones were computed after a code change. A dissociation curve that
+    # changes prior halfway along is exactly what Sec. S6 argues must not be
+    # done.
+    #
+    # Pure Fermi-Amaldi wins because it is what 197 of the 203 geometries
+    # actually ran, so the published deposit stays valid and reproducible. The
+    # interpolated LDA-core guide would act on EVERY system with N > 2 --
+    # measured: max|v_guide - v_FA| = 0.85 Eh in LiH, 4.32 Eh in N2, 0.00 in
+    # H2 -- that is 8 of the 10 members and 161 of the 203 geometries.
+    # Introducing it is a decision for a new benchmark, not a late patch on
+    # this one.
+    #
+    # CFG.guide_lda_core stays False and Sec. 3.1 describes what was done.
+    # `guide_core_shift_Eh` is written ALWAYS (it is 0 with pure
+    # Fermi-Amaldi), so all 203 rows share one schema and this defect cannot
+    # recur silently.
     v_H = mo.hartree_potential_on_points(mol, ref_dm, coords)
-    v_fa = -v_H / max(n_elec, 1)
+    v_guide, v_fa = mo.xc_guide_on_points(mol, ref_dm, coords, rho=rho_ref,
+                                          v_h=v_H)
+    guide_shift = float(np.max(np.abs(v_guide - v_fa)))
     J_ref = iv.make_J(mol, ref_dm)
     inv = iv.invert_geometry(mol, grids, ao_value, ref_dm, rho_ref,
-                             rho_spin, v_fa, J_ref, dm_alpha=dma, dm_beta=dmb)
+                             rho_spin, v_guide, J_ref, dm_alpha=dma,
+                             dm_beta=dmb)
     mode = inv.get('inv_mode', 'UNKNOWN')
     status = ('OK' if inv['good']
               else ('FAIL' if inv['failed'] else 'MARGINAL'))
@@ -141,13 +166,24 @@ def process_geometry(member, r):
            "cas_converged": ref['cas_conv'],
            "nevpt2_ok": bool(np.isfinite(ref['e_nevpt2'])),
            "anion_caveat": member['anion_caveat'],
+           # FIX-D4: written ALWAYS, including when it is 0 (N <= 2), so no
+           # row lacks the field and the deposit has one schema across all
+           # 203 geometries.
+           "guide_core_shift_Eh": guide_shift,
+           "guide_lda_core": bool(CFG.guide_lda_core),
+           "guide_rho_switch": float(CFG.guide_rho_switch),
            "sie_validation_1e": sie_validation}
 
     # ---- 6) dense 1D profiles + figures ------------------------------------
     z_b, line_pts = mo.dense_axis_line(r)
     v_H_line = mo.hartree_potential_on_points(mol, ref_dm, line_pts)
     v_fa_line = -v_H_line / max(n_elec, 1)
-    cols = {"V_Hartree": v_H_line, "V_FA": v_fa_line}
+    # FIX-D4: the prior that was actually used, in EVERY geometry. V_Guide
+    # used to appear in 6 files of 203, which is what gave the defect away.
+    v_guide_line, _ = mo.xc_guide_on_points(mol, ref_dm, line_pts,
+                                            v_h=v_H_line)
+    cols = {"V_Hartree": v_H_line, "V_FA": v_fa_line,
+            "V_Guide": v_guide_line}
     if len(inv['b_list']) == 2:
         va_l = v_fa_line + inv['inverters'][0].v_on_points(
             inv['b_list'][0], line_pts)
@@ -161,12 +197,23 @@ def process_geometry(member, r):
     ao_line = mol.eval_gto('GTOval', line_pts)
     rho_line = dft.numint.eval_rho(mol, ao_line, ref_dm, xctype='LDA')
     cols.update(Vxc_Exact=vxc_line, Rho_Exact=rho_line)
-    # ensemble channel: export the rigorous ensemble v_xc, the BS diagnostic
-    # v_xc, and their difference (framework-ambiguity metric) along the axis.
+    # ensemble channel: export the BS diagnostic v_xc and its difference
+    # against the ensemble one (the framework-ambiguity metric) along the axis.
+    #
+    # Vxc_Ensemble is NOT written when it is a copy of Vxc_Exact, which is the
+    # single-channel case and was 123 of the 123 files that carried it. When
+    # there is one inverter, inversion.py returns inverters=[ens] and this
+    # column reconstructs Vxc_Exact from the same coefficients: no number was
+    # wrong, but a column promising a contrast and delivering a duplicate is
+    # how a reader of the deposit concludes that two things agree when only
+    # one thing was computed. The identity is documented in the deposit README
+    # instead. Where the column is genuinely independent (two channels) it is
+    # still written.
     if inv.get('vxc_ensemble') is not None:
         vxc_ens_line = v_fa_line + inv['inverters'][0].v_on_points(
             inv['b_list'][0], line_pts)
-        cols["Vxc_Ensemble"] = vxc_ens_line
+        if not np.allclose(vxc_ens_line, vxc_line, rtol=0, atol=0):
+            cols["Vxc_Ensemble"] = vxc_ens_line
         if inv.get('vxc_bs') is not None and len(inv.get('bs_b_list', [])) == 2:
             vba = v_fa_line + inv['bs_inverters'][0].v_on_points(
                 inv['bs_b_list'][0], line_pts)
@@ -309,6 +356,61 @@ def _geometry_report(row, name, n_elec=None):
     return lines
 
 
+def _write_curve(name, rows, recomputed, _log=print):
+    """Write the dissociation CSV without destroying the post-pass columns.
+
+    The scan rebuilds `rows` from the per-geometry `.row.json` files, which
+    carry the scan's own fields and nothing else. Writing that straight out
+    deleted every `DeltaI_*` column the functional post-pass had added, so the
+    post-pass recomputed all ten systems on EVERY launch -- including runs
+    where the scan computed nothing at all, because the rewrite happens either
+    way. That is the "it always stops at the post-pass" report of 2026-08-13,
+    and the reason `functional_postpass_force = False` appeared not to work:
+    the flag was obeyed, the columns it protects were simply not there any
+    more by the time the post-pass looked.
+
+    The scan owns its columns and the post-pass owns its own; neither may
+    delete the other's. Columns the scan did not produce are carried over from
+    the existing file, matched on R, EXCEPT at geometries recomputed this run
+    -- there the exact side changed, so a stale metric would be worse than a
+    missing one and it is dropped so the post-pass refills it.
+    """
+    import os
+    import pandas as pd          # local, as everywhere else in this module
+    path = f"results_energies/{name}_Dissociation_Curve.csv"
+    fresh = pd.DataFrame(rows)
+    if os.path.exists(path) and 'R_Angstrom' in fresh.columns:
+        try:
+            old = pd.read_csv(path)
+        except Exception:                                     # noqa: BLE001
+            old = None
+        if old is not None and 'R_Angstrom' in old.columns:
+            # `postpass_cleared` is this function's own bookkeeping, not a
+            # post-pass result: it is rebuilt below, never carried over.
+            extra = [c for c in old.columns
+                     if c not in fresh.columns and c != 'postpass_cleared']
+            if extra:
+                keep = old[['R_Angstrom'] + extra].copy()
+                keep['postpass_cleared'] = False
+                if recomputed:
+                    stale = keep['R_Angstrom'].round(3).isin(
+                        [round(r, 3) for r in recomputed])
+                    keep.loc[stale, extra] = float('nan')
+                    # A blanked cell in an otherwise full column is invisible
+                    # to the post-pass's "is this system already scored?"
+                    # test, which asks whether the column is entirely empty.
+                    # Say it out loud instead of hoping it is noticed.
+                    keep.loc[stale, 'postpass_cleared'] = True
+                fresh['_r'] = fresh['R_Angstrom'].round(3)
+                keep['_r'] = keep['R_Angstrom'].round(3)
+                fresh = fresh.merge(keep.drop(columns=['R_Angstrom']),
+                                    on='_r', how='left').drop(columns=['_r'])
+                _log(f"  [curve] carried over {len(extra)} post-pass column(s)"
+                     + (f"; cleared at {len(recomputed)} recomputed "
+                        f"geometry(ies)" if recomputed else ""))
+    fresh.to_csv(path, index=False)
+
+
 def run_pipeline(only=None):
     """only: optional list of member names to run (shakedown); None = full
     benchmark set. Filtering happens before preflight so the log reflects the scope."""
@@ -327,6 +429,7 @@ def run_pipeline(only=None):
              f"{member['nelecas']}), Re={member['r_eq']} A) <---")
         distances = mo.make_distance_grid(member['r_eq'])
         rows = []
+        recomputed = []          # R values whose exact side changed this run
         n_loaded = n_computed = 0
         # Single up-front statement of what is already on disk. Individual
         # geometries below are then reported identically whether they are
@@ -365,10 +468,10 @@ def run_pipeline(only=None):
                      + traceback.format_exc(limit=3))
                 row = {"R_Angstrom": r, "inv_status": "ERROR"}
             n_computed += 1
+            recomputed.append(float(r))
             rows.append(row)
             ex.save_row(name, r, row)
-        pd.DataFrame(rows).to_csv(
-            f"results_energies/{name}_Dissociation_Curve.csv", index=False)
+        _write_curve(name, rows, recomputed, _log)
         # End-of-system characterization, for LOADED and COMPUTED points
         # alike (both are in `rows`): the Richards fit of the unpaired-electron
         # curve and the Morse fit of the energy curve, each reported with the

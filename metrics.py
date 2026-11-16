@@ -51,17 +51,41 @@ def delta_metrics(v_exact, v_dfa, rho, coords_bohr, w, r_ang, weighting=None):
                   to reproduce old numbers for comparison.
 
     WHY THE CHANGE. The exact vxc builds a correlation BARRIER at the bond
-    midpoint as the bond stretches (verified on the clean H2 sweep: the vxc
-    maximum sits exactly at z=0 for R >= 1.258 A, with prominence growing
-    2.77 -> 3.17 -> 3.30 Eh). That barrier is the physics this metric exists to
-    detect — and it lives exactly where the density is LOWEST. Weighting by rho
-    therefore suppresses it by construction and hands the metric to the nuclear
-    region instead (at R=1.35: rho*|dv| = 2.63 at the nucleus vs 0.25 at the
-    barrier). The consequence was a metric that peaked at EQUILIBRIUM:
+    midpoint as the bond stretches. That barrier is the physics this metric
+    exists to detect — and it lives exactly where the density is LOWEST.
+    Weighting by rho therefore suppresses it by construction and hands the
+    metric to the nuclear region instead (at R=1.35: rho*|dv| = 2.63 at the
+    nucleus vs 0.25 at the barrier). The consequence was a metric whose
+    maximum sat against equilibrium instead of in the bond-breaking region.
+
+    NO PEAK POSITIONS ARE QUOTED IN THIS DOCSTRING, AND NONE MAY BE ADDED.
+    (D3, resolved 2026-08-07.) This block used to read
 
         weighting     max of DeltaI_bar (clean H2)
-        density       R = 0.740 A   <- equilibrium; unphysical
-        volume        R = 1.258 A   <- Coulson-Fischer (D_CF = 1.305 A)
+        density       R = 0.740 A
+        volume        R = 1.258 A
+
+    while the paper's Section 2.1 reads 0.814 A and 1.146 A for the same two
+    cases. Four numbers, two sources, no pair agreeing — and the peak POSITION
+    is the only thing the paper claims about DeltaI_bar (its MAGNITUDE it
+    declares to be governed by the regularization). A number that is claimed
+    cannot live in two places and drift.
+
+    Provenance of the two candidate readings, for whoever recomputes:
+      * 0.814 A is traceable to a KNOWN-BAD read. validation.py's column
+        guard documents it verbatim: a run of run_grid_resolution picked up a
+        stale legacy column, 'DeltaI_bar_LDA-VWN_exact_Eh_OLDFILE' — a suffix
+        functional_eval.column_name() cannot produce — and reported the peak
+        at 0.814 A. That auto-pick has since been replaced by an explicit
+        column regex, but the number had already reached the manuscript.
+      * 1.258 A and 0.740 A are labelled 'clean H2 sweep', a scan that is not
+        the published 22-geometry H2 scan (whose grid contains 0.740 but
+        neither 1.258 nor 1.146).
+
+    THE ONE GENERATOR is validation.run_grid_resolution over the production
+    results_energies/HH_q+0_s0_Dissociation_Curve.csv; THE ONE WRITTEN HOME is
+    HECHOS_Y_CIFRAS.md. Recompute there, copy into the manuscript from there,
+    and leave this docstring numberless.
 
     The gauge c is still the L1-optimal constant under the SAME weighting, so
     DeltaI_bar remains invariant to the arbitrary constant in vxc.

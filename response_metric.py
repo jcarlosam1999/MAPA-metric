@@ -63,7 +63,8 @@ def ks_occupations(C, S, D_ks, tol=1e-8):
     return np.where(np.abs(n) < tol, 0.0, n)
 
 
-def drho_from_dv(eps, C, occ, ao, weights, dv, deg_tol=1e-6):
+def drho_from_dv(eps, C, occ, ao, weights, dv, deg_tol=1e-6,
+                 occ_occ=True):
     """drho = chi . dv: the literal sum over all ordered pairs (i != j),
 
         chi = sum_{i!=j} (n_i - n_j)/(eps_i - eps_j) phi_i phi_j (x) phi_i phi_j
@@ -74,7 +75,18 @@ def drho_from_dv(eps, C, occ, ao, weights, dv, deg_tol=1e-6):
     contribute through (n_i - n_j) in both orders. Vectorized as (K * M)
     contracted twice with phi,
     K_ij = (n_i-n_j)/(eps_i-eps_j), M_ij = <phi_i|dv|phi_j>. Degenerate pairs
-    (|eps_i-eps_j| < deg_tol) are skipped."""
+    (|eps_i-eps_j| < deg_tol) are skipped.
+
+    `occ_occ=False` drops the occupied-occupied block, i.e. reproduces the
+    textbook occupied-virtual form. It exists ONLY to MEASURE what discarding
+    those pairs costs (task 1.16): Sec. 2.3 of the paper asserts that dropping
+    them 'misrepresents the displaced density by tens of percent in the
+    bond-breaking region', and until now that claim had no released generator.
+    Production must always run with occ_occ=True; the whole point of the
+    fractional-occupation generalization is that this block does not vanish.
+    A pair counts as occupied-occupied when BOTH occupations exceed
+    `occ_floor` — the same integer-vs-fractional distinction the metric rests
+    on, not a tunable knob."""
     phi = ao @ C
     n = np.asarray(occ, float)
     eps = np.asarray(eps, float)
@@ -83,6 +95,10 @@ def drho_from_dv(eps, C, occ, ao, weights, dv, deg_tol=1e-6):
     de = eps[:, None] - eps[None, :]
     K = np.zeros_like(M)
     ok = (np.abs(de) >= deg_tol) & (np.abs(dn) >= 1e-12)
+    if not occ_occ:
+        occ_floor = 1e-6
+        both_occupied = (n[:, None] > occ_floor) & (n[None, :] > occ_floor)
+        ok = ok & ~both_occupied
     K[ok] = dn[ok] / de[ok]
     return np.einsum('gi,ij,gj->g', phi, K * M, phi, optimize=True)
 
@@ -107,7 +123,8 @@ def bond_mask(coords, r_ang, cyl_rad, bohr):
 
 
 def response_deltaI(mol, coords, weights, ao, vxc_exact, D_ks, J,
-                    dv, r_ang, cyl_rad, bohr, deg_tol=1e-6):
+                    dv, r_ang, cyl_rad, bohr, deg_tol=1e-6,
+                    occ_occ=True):
     """DeltaI_resp for one geometry and one functional, from the saved exact
     side. `dv` is vxc_exact - vxc_functional on the grid (already built by the
     caller). `ao` is the plain GTOval (ngrid, nao). Returns a dict with the
@@ -125,7 +142,8 @@ def response_deltaI(mol, coords, weights, ao, vxc_exact, D_ks, J,
     wm = weights[m]
 
     def dibar(dt):
-        drho = drho_from_dv(eps, C, occ, ao, weights, dv, deg_tol=dt)
+        drho = drho_from_dv(eps, C, occ, ao, weights, dv, deg_tol=dt,
+                            occ_occ=occ_occ)
         return float(np.sum(wm * np.abs(drho[m])) / wm.sum())
 
     val = dibar(deg_tol)

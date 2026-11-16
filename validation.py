@@ -37,6 +37,8 @@ import sys
 import numpy as np
 import scipy.linalg
 
+import artifacts as art
+
 from response_metric import (ks_system, ks_occupations, drho_from_dv,
                              skipped_pairs)
 
@@ -252,6 +254,12 @@ def run_grid_resolution(csv_path=None, col=None, r_eq=None,
 
     specs = [tuple(int(x) for x in s.split(',')) for s in grids.split(';')]
     worst = {s: {'argmax': 0.0, 'spline': 0.0} for s in specs}
+    # Rows for the artifact. This routine used to return None: it printed a
+    # full table and left nothing on disk, so Sec. S1 of the manuscript had no
+    # deposited source and the stage re-ran on every launch because `have()`
+    # could never see it. A validation whose only output is prose in a log is
+    # not deposited and cannot be checked.
+    rows = []
     for c in cols:
         yy = df[c].to_numpy(float)
         g = np.isfinite(R) & np.isfinite(yy)
@@ -280,6 +288,18 @@ def run_grid_resolution(csv_path=None, col=None, r_eq=None,
             log(f"    {f'({nc},{nb})':>8} {len(Rd):5d} {spacing:8.3f} "
                   f"{da:9.4f} {f(da, ra):8.4f} {dp:9.4f} {f(dp, rp):8.4f} "
                   f"{ds:9.4f} {f(ds, rs):8.4f}")
+            rows.append(dict(system=name, column=c, n_compressed=nc,
+                             n_bond=nb, n_points=int(len(Rd)),
+                             spacing_A=float(spacing),
+                             peak_full_argmax_A=float(ra),
+                             peak_full_parabolic_A=float(rp),
+                             peak_full_spline_A=float(rs),
+                             peak_argmax_A=float(da),
+                             peak_parabolic_A=float(dp),
+                             peak_spline_A=float(ds),
+                             shift_argmax_A=float(f(da, ra)),
+                             shift_parabolic_A=float(f(dp, rp)),
+                             shift_spline_A=float(f(ds, rs))))
         log()
 
     if len(cols) > 1:
@@ -307,6 +327,7 @@ def run_grid_resolution(csv_path=None, col=None, r_eq=None,
     log("  N_unpaired plateaus and no fit needs the resolution.")
     log("  d(argmax) can only move in whole grid steps; a large d(argmax)")
     log("  with a small d(spline) just means interpolation is doing its job.")
+    return rows
 
 # ==========================================================================
 # [B] response invariance: is DeltaI_resp kappa-free?
@@ -469,7 +490,7 @@ def validate_response(inp, out, dv, eps, C, occ,
 def run_response_invariance(system='HH_q+0_s0',
                             Rlist=(1.110, 1.628, 2.157),
                             kappas=(1e-7, 1e-6, 1e-5),
-                            functional='PBE,PBE', log=print):
+                            functional='PBE,PBE', tag=None, log=print):
     """Is the response-projected DeltaI invariant to the regularization?
 
     Re-inverts each geometry at several fixed kappas and compares both
@@ -489,6 +510,12 @@ def run_response_invariance(system='HH_q+0_s0',
             todo.append((k, paths[k]))
     if not todo:
         raise SystemExit("no matching npz")
+
+    # Every row is also collected as data. This used to print and nothing
+    # else, so Table 1 -- the central claim of the paper -- could only be
+    # checked by scraping the run log with a regular expression. A number the
+    # paper prints has to come out of a file a reader can open.
+    rows = []
 
     log(f"{'='*80}")
     log("Is a RESPONSE-based DeltaI invariant to the regularization?")
@@ -557,6 +584,15 @@ def run_response_invariance(system='HH_q+0_s0',
                   f"{res:>15.6f} {n_frac:>6d} {nskip:>5d} {wskip:>7.3f} "
                   f"{100 * dg_spread:>8.2f} {best:>9.2e} {slope:>6.2f}  "
                   f"{verdict:>8}")
+            rows.append(dict(
+                system=system, R_Angstrom=R, kappa=float(k),
+                density_error=float(out['density_error']),
+                dIbar_current=float(cur), dIbar_response=float(res),
+                n_frac=n_frac, n_skipped=nskip, w_skipped=float(wskip),
+                degtol_span_pct=float(100 * dg_spread),
+                fd_residual=float(best), fd_slope=float(slope),
+                min_gap=float(gap), chi_verdict=verdict,
+                functional=functional))
 
     log(f"\n{'='*80}\nREADING\n{'='*80}")
     log("'n_frac' counts FRACTIONALLY occupied KS orbitals. n_frac > 0 means")
@@ -615,6 +651,11 @@ def run_response_invariance(system='HH_q+0_s0',
     log("control. dIbar_RESPONSE holding steady across the same range is the")
     log("invariance the response projection is built to provide, and leaves")
     log("a magnitude in e/bohr^3 rather than only a peak position.")
+
+    if tag:
+        art.save_rows(tag, rows)
+        log(f"\n[artifact] {art.path(tag)}  ({len(rows)} rows)")
+    return rows
 
 # ==========================================================================
 # [C] functional-derivative identity (spin-polarized)
@@ -857,7 +898,15 @@ def check(member_name, r_ang=None, n_probe=3, seed=0,
             log("     terms (gs_ab and the f_ab divergence): they exist only")
             log("     in the spin path, so they are the difference between")
             log("     this and the closed-shell control.")
-    return True
+    # The artifact. This returned a bare True: the identity was verified,
+    # printed, and left nothing a reader could check or a deposit could carry.
+    # Sec. S3 of the manuscript quotes two numbers from this routine and had
+    # no deposited source for either.
+    return [dict(system=member_name, R_Angstrom=(float(r_ang)
+                                                 if r_ang is not None else None),
+                 route=label, grid_level=int(lev),
+                 rel_L1=float(wr), abs_error=float(wa))
+            for label, vals in rows.items() for lev, wr, wa in vals]
 
 # ============================================================================
 # [D] ensemble seam: what a mid-curve scheme switch would cost
@@ -897,6 +946,7 @@ def run_ensemble_seam(system=None, Rlist=None, functional='PBE,PBE',
     log(f"{'R':>7} {'unified':>12} {'switched':>12} {'inv_mode':>18}")
     finfo = fe.resolve_functional(functional)
     series = {True: [], False: []}
+    modes = []
     for R in Rlist:
         inp = prep(paths[R])
         mask = bond_mask(inp['grids'].coords, R)
@@ -914,6 +964,7 @@ def run_ensemble_seam(system=None, Rlist=None, functional='PBE,PBE',
                                           inp['grids'].weights, mask),
                             out.get('inv_mode', '?'))
             series[unified].append(row[unified][0])
+        modes.append(row[False][1])
         log(f"{R:>7.3f} {row[True][0]:>12.4f} {row[False][0]:>12.4f} "
             f"{row[False][1]:>18}")
 
@@ -931,6 +982,7 @@ def run_ensemble_seam(system=None, Rlist=None, functional='PBE,PBE',
     log("  The unified scheme removes the seam by construction; the switched")
     log("  column is what the metric would inherit if it were not used.")
     return dict(R=list(Rlist), unified=series[True], switched=series[False],
+                switched_inv_mode=modes,
                 jump_unified=ju, jump_switched=js)
 
 
@@ -1044,12 +1096,16 @@ def run_all(log=print, deriv_member=None, **overrides):
         deriv_member = CFG.validation_openshell_member
     results = {}
 
-    def guarded(tag, fn, **kw):
+    def guarded(stage, fn, **kw):
+        # The parameter is `stage`, not `tag`: run_response_invariance takes a
+        # `tag` of its own (the artifact it writes), and the two collided as
+        # `guarded() got multiple values for argument 'tag'` the first time a
+        # kappa sweep ran from main. Different things, different names.
         try:
-            results[tag] = fn(log=log, **kw)
+            results[stage] = fn(log=log, **kw)
         except Exception as e:                                # noqa: BLE001
-            log(f"[validation] {tag} skipped: {type(e).__name__}: {e}")
-            results[tag] = None
+            log(f"[validation] {stage} skipped: {type(e).__name__}: {e}")
+            results[stage] = None
 
     plan = [(t_, f_) for t_, f_ in (
         ('grid_resolution', 'validate_grid_resolution'),
@@ -1059,14 +1115,49 @@ def run_all(log=print, deriv_member=None, **overrides):
         ('ensemble_seam', 'validate_ensemble_seam'),
         ('kappa_invariance_heavy', 'validate_kappa_invariance_heavy'),
         ('fine_grid_scan', 'validate_fine_grid_scan')) if on(f_)]
-    log(f"[validation] running {len(plan)} of 7 validations: "
-        f"{', '.join(t_ for t_, _ in plan) or 'none'}")
+    if on('validate_kappa_invariance_extra'):
+        for _sys, _R, _k in CFG.validation_kappa_extra:
+            plan.append((f'kappa_invariance_extra_{_sys}',
+                         'validate_kappa_invariance_extra'))
 
-    for tag, _flag in plan:
+    # Already finished in an earlier run? Then it is not re-run. These are the
+    # expensive stages -- the N2 kappa sweep alone is a working day -- and the
+    # point of the artifact registry is that `python main.py` can be
+    # interrupted and relaunched without paying for what is already on disk.
+    # Skipping is reported by name, never silently: a stage that vanishes from
+    # the output because it was skipped looks exactly like a stage that was
+    # never configured.
+    force = bool(getattr(CFG, 'validation_force', False))
+    done = [t_ for t_, _ in plan if art.have(t_) and not force]
+    todo_plan = [(t_, f_) for t_, f_ in plan if t_ not in done]
+    if done:
+        log(f"[validation] already on disk, not recomputed: "
+            f"{', '.join(done)}")
+        log(f"[validation] (set CFG.validation_force = True to redo them)")
+        # Replayed, not merely named. A stage whose numbers vanish from the
+        # log because this launch happened not to recompute it is a stage the
+        # reader has to go and look up; the scan has replayed saved geometries
+        # through the same reporter since the beginning, and stages get the
+        # same treatment here.
+        for t_ in done:
+            art.report(t_, read=True, log=log)
+    log(f"[validation] running {len(todo_plan)} of {len(plan)} validations: "
+        f"{', '.join(t_ for t_, _ in todo_plan) or 'none'}")
+    for t_ in done:
+        results[t_] = 'cached'
+
+    for tag, _flag in todo_plan:
         if tag == 'grid_resolution':
             guarded(tag, run_grid_resolution)
         elif tag == 'functional_derivative':
             guarded(tag, run_functional_derivative, member=deriv_member)
+        elif tag.startswith('kappa_invariance_extra_'):
+            member = tag[len('kappa_invariance_extra_'):]
+            probe = next(p_ for p_ in CFG.validation_kappa_extra
+                         if p_[0] == member)
+            system, Rlist, kappas = probe
+            guarded(tag, run_response_invariance, system=system,
+                    Rlist=tuple(Rlist), kappas=tuple(kappas), tag=tag)
         elif tag in ('kappa_invariance', 'kappa_wide_range',
                      'kappa_invariance_heavy'):
             probe = {'kappa_invariance': CFG.validation_kappa_light,
@@ -1074,11 +1165,21 @@ def run_all(log=print, deriv_member=None, **overrides):
                      'kappa_invariance_heavy': CFG.validation_kappa_heavy}[tag]
             system, Rlist, kappas = probe
             guarded(tag, run_response_invariance, system=system,
-                    Rlist=tuple(Rlist), kappas=tuple(kappas))
+                    Rlist=tuple(Rlist), kappas=tuple(kappas), tag=tag)
         elif tag == 'ensemble_seam':
             guarded(tag, run_ensemble_seam)
         elif tag == 'fine_grid_scan':
             guarded(tag, run_fine_grid_scan)
+        # run_response_invariance writes its own artifact (it is the only one
+        # that produces a table rather than a verdict); the rest are
+        # serialized from whatever they returned.
+        if not tag.startswith('kappa_'):
+            try:
+                if art.save_any(tag, results.get(tag)):
+                    art.report(tag, read=False, log=log)
+            except Exception as e:                            # noqa: BLE001
+                log(f"[validation] {tag}: could not serialize "
+                    f"({type(e).__name__}: {e}); it will run again next time")
     return results
 
 
